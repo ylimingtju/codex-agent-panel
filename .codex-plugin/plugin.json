@@ -1,6 +1,6 @@
 {
   "name": "savvy-progress-codex",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "在当前聊天跟踪计划验收和子代理步骤，用本机 Codey 显示代理状态。",
   "license": "UNLICENSED",
   "skills": "./skills/",

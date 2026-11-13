@@ -65,6 +65,11 @@ def store(*, read=False):
             if db.execute("PRAGMA user_version").fetchone()[0] == 1:
                 db.execute("ALTER TABLE agents ADD COLUMN tokens INTEGER")
                 db.execute("PRAGMA user_version=2")
+            if db.execute("PRAGMA user_version").fetchone()[0] == 2:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS run_turns(flow TEXT, parent_turn TEXT, PRIMARY KEY(flow,parent_turn))"
+                )
+                db.execute("PRAGMA user_version=3")
             yield db
 
 
@@ -146,6 +151,200 @@ def current(db, root):
     ).fetchone()
 
 
+def parent_at(root, timestamp):
+    """Only a unique parent turn overlapping the recorded event can anchor a legacy run."""
+    with metadata("thread_history_1.sqlite") as db:
+        rows = db.execute(
+            "SELECT turn_id,coalesce(root_turn_id,turn_id) AS anchor FROM thread_turns "
+            "WHERE thread_id=? AND started_at<=? AND (completed_at>=? OR (completed_at IS NULL AND status='inProgress')) LIMIT 2",
+            (root, int(timestamp), int(timestamp)),
+        ).fetchall()
+    return rows[0]["anchor"] if len(rows) == 1 else None
+
+
+def thread_anchor(actor, turn):
+    try:
+        with metadata("thread_history_1.sqlite") as db:
+            row = db.execute(
+                "SELECT root_turn_id FROM thread_turns WHERE thread_id=? AND turn_id=?",
+                (actor, turn),
+            ).fetchone()
+            return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def add_anchor(db, run, timestamp):
+    try:
+        anchor = parent_at(run["root"], timestamp)
+    except (OSError, sqlite3.Error):
+        return None
+    if anchor:
+        db.execute("INSERT OR IGNORE INTO run_turns VALUES(?,?)", (run["id"], anchor))
+    return anchor
+
+
+def history_workers(root, anchors, previous_end):
+    """Use spawn edges and per-thread turn indexes; read only IDs, times and delivery flags."""
+    if not anchors:
+        return []
+    with metadata("state_5.sqlite") as source:
+        descendants = source.execute(
+            """
+            WITH RECURSIVE crew(id) AS (
+                SELECT child_thread_id FROM thread_spawn_edges WHERE parent_thread_id=?
+                UNION SELECT e.child_thread_id FROM thread_spawn_edges e JOIN crew ON e.parent_thread_id=crew.id)
+            SELECT id FROM crew WHERE id!=?""",
+            (root, root),
+        ).fetchall()
+    crew = [r[0] for r in descendants]
+    marks = ",".join("?" for _ in anchors)
+    workers = []
+    with metadata("thread_history_1.sqlite") as h:
+        for child in crew:
+            args = [child, *anchors]
+            query = f"""SELECT t.thread_id,t.turn_id,t.root_turn_id,t.rollout_ordinal,t.status,t.started_at,t.completed_at,
+                EXISTS(SELECT 1 FROM thread_items i WHERE i.thread_id=t.thread_id AND i.turn_id=t.turn_id
+                    AND i.item_id=t.final_agent_item_id AND i.item_type='agentMessage'
+                    AND json_extract(i.item_json,'$.phase')='final_answer'
+                    AND length(trim(json_extract(i.item_json,'$.text')))>0) AS delivered
+                FROM thread_turns t WHERE t.thread_id=? AND t.root_turn_id IN ({marks}) AND t.started_at IS NOT NULL"""
+            if previous_end is not None:
+                query += " AND t.started_at>?"
+                args.append(int(previous_end))
+            record = h.execute(
+                query + " ORDER BY t.rollout_ordinal DESC LIMIT 1", args
+            ).fetchone()
+            if record:
+                try:
+                    info = identity(child)
+                except ValueError:
+                    continue
+                if info["root"] == root and info["caller"] == "worker":
+                    workers.append((info, record))
+    return workers
+
+
+def native_agent_status(record):
+    status = record["status"]
+    end = record["completed_at"]
+    if status == "inProgress" and end is None:
+        return "running", None
+    return {
+        "failed": "failed",
+        "interrupted": "interrupted",
+        "completed": "ended" if record["delivered"] else "stopped",
+    }.get(status), end
+
+
+def merge_observation(db, run, info, record):
+    state, end = native_agent_status(record)
+    if not state:
+        return
+    flow, actor, turn = run["id"], info["actor"], record["turn_id"]
+    if db.execute(
+        "SELECT 1 FROM agents WHERE id=? AND turn=? AND flow!=?", (actor, turn, flow)
+    ).fetchone():
+        return
+    old = db.execute(
+        "SELECT turn,status,started_at,ended_at FROM agents WHERE flow=? AND id=?",
+        (flow, actor),
+    ).fetchone()
+    if not old:
+        db.execute(
+            "INSERT INTO agents(flow,id,name,model,effort,status,started_at,ended_at,turn) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                flow,
+                actor,
+                info["name"],
+                info["model"],
+                info["effort"],
+                state,
+                record["started_at"],
+                end,
+                turn,
+            ),
+        )
+        return
+    if old["turn"] != turn and old["turn"]:
+        previous = turn_info(actor, old["turn"])
+        if previous and previous["rollout_ordinal"] >= record["rollout_ordinal"]:
+            return
+        if previous:
+            db.execute(
+                "UPDATE agents SET done=NULL,total=NULL,note='',status=?,started_at=?,ended_at=?,turn=? WHERE flow=? AND id=?",
+                (state, record["started_at"], end, turn, flow, actor),
+            )
+            return
+    # Explicit delivery or failure survives a later observation of an in-flight model request.
+    if (
+        state == "running"
+        or old["status"] in ("failed", "cancelled", "interrupted")
+        and state not in ("failed", "interrupted")
+        or old["status"] == "ended"
+        and state == "stopped"
+    ):
+        state, end = old["status"], old["ended_at"]
+    if (old["turn"], old["status"], old["started_at"], old["ended_at"]) != (
+        turn,
+        state,
+        record["started_at"],
+        end,
+    ):
+        db.execute(
+            "UPDATE agents SET turn=?,status=?,started_at=?,ended_at=? WHERE flow=? AND id=?",
+            (turn, state, record["started_at"], end, flow, actor),
+        )
+
+
+def prior_end(db, run):
+    row = db.execute(
+        "SELECT max(ended_at) FROM runs WHERE root=? AND rowid < (SELECT rowid FROM runs WHERE id=?)",
+        (run["root"], run["id"]),
+    ).fetchone()
+    return row[0]
+
+
+def reconcile(db, run, *, manager_action=False):
+    if run is None or run["status"] != "active":
+        return
+    if manager_action:
+        add_anchor(db, run, time.time())
+    anchors = [
+        r[0]
+        for r in db.execute(
+            "SELECT parent_turn FROM run_turns WHERE flow=?", (run["id"],)
+        )
+    ]
+    if not anchors:
+        inferred = add_anchor(db, run, run["started_at"])
+        anchors = [inferred] if inferred else []
+    try:
+        for info, record in history_workers(run["root"], anchors, prior_end(db, run)):
+            merge_observation(db, run, info, record)
+    except (sqlite3.Error, OSError):
+        pass
+    if not anchors:
+        # Old Codex releases may have lifecycle turns but no root_turn_id column.
+        for agent in db.execute(
+            "SELECT id,turn FROM agents WHERE flow=? AND status IN ('running','waiting') AND turn IS NOT NULL",
+            (run["id"],),
+        ):
+            r = turn_info(agent["id"], agent["turn"])
+            if not r or not r["completed_at"]:
+                continue
+            status = {
+                "failed": "failed",
+                "interrupted": "interrupted",
+                "completed": "stopped",
+            }.get(r["status"])
+            if status:
+                db.execute(
+                    "UPDATE agents SET status=?,ended_at=? WHERE flow=? AND id=?",
+                    (status, r["completed_at"], run["id"], agent["id"]),
+                )
+
+
 def create_run(db, root):
     now = time.time()
     db.execute(
@@ -153,7 +352,9 @@ def create_run(db, root):
         "VALUES(?,?,?,'多代理任务','','active',?,?)",
         (token(), root, token(), now, now),
     )
-    return current(db, root)
+    run = current(db, root)
+    add_anchor(db, run, now)
+    return run
 
 
 def entitled(db, info, new=False):
@@ -161,9 +362,24 @@ def entitled(db, info, new=False):
     if info["caller"] == "manager":
         if new and latest and latest["status"] == "active":
             raise ValueError("当前任务仍在进行中，请先验收完成或明确中断")
-        return create_run(db, info["root"]) if latest is None or new else latest
+        run = create_run(db, info["root"]) if latest is None or new else latest
+        reconcile(db, run, manager_action=True)
+        return run
     if new:
         raise ValueError("Only the manager may create a run")
+    if latest and latest["status"] == "active":
+        reconcile(db, latest)
+        membership = db.execute(
+            "SELECT turn FROM agents WHERE flow=? AND id=?",
+            (latest["id"], info["actor"]),
+        ).fetchone()
+        if membership:
+            last = turn_info(info["actor"])
+            if last:
+                anchor = thread_anchor(info["actor"], last["turn_id"])
+                if anchor and last["turn_id"] != membership["turn"]:
+                    raise ValueError("Worker turn is not part of this run")
+            return latest
     linked = db.execute(
         "SELECT r.* FROM agents a JOIN runs r ON a.flow=r.id "
         "WHERE a.id=? AND r.root=? ORDER BY r.rowid DESC LIMIT 1",
@@ -171,6 +387,10 @@ def entitled(db, info, new=False):
     ).fetchone()
     if linked:
         return linked
+    if latest and latest["status"] == "active":
+        last = turn_info(info["actor"])
+        if last and thread_anchor(info["actor"], last["turn_id"]):
+            raise ValueError("Worker turn is not part of this run")
     if latest is None or latest["status"] != "active":
         raise ValueError("Parent has no active progress run")
     record_agent(db, latest["id"], info, "running")
@@ -364,6 +584,14 @@ def record_agent(db, flow, info, status, turn=None):
             ),
         )
     elif status == "running":
+        if turn and old["turn"] and turn != old["turn"]:
+            incoming = turn_info(actor, turn)
+            previous = turn_info(actor, old["turn"])
+            if previous and (
+                not incoming
+                or previous["rollout_ordinal"] > incoming["rollout_ordinal"]
+            ):
+                return
         if old["status"] != "running" and (turn is None or turn == old["turn"]):
             return
         db.execute(
@@ -429,7 +657,9 @@ def resolve_worker(db, run, reference):
             ):
                 matches.append(worker["actor"])
         if not matches:
-            raise WorkerNotRegistered("代理路径在本轮尚无唯一匹配，请稍后重试或使用本轮详情中的线程 ID")
+            raise WorkerNotRegistered(
+                "代理路径在本轮尚无唯一匹配，请稍后重试或使用本轮详情中的线程 ID"
+            )
         if len(matches) != 1:
             raise ValueError("代理路径在本轮没有唯一匹配，请使用本轮详情中的线程 ID")
         return matches[0]
@@ -597,9 +827,21 @@ def step(binding, **payload):
 
 def snapshot(view_key):
     with store(read=True) as db:
-        run = db.execute("SELECT * FROM runs WHERE view_key=?", (view_key,)).fetchone()
-        if not run:
+        row = db.execute(
+            "SELECT status FROM runs WHERE view_key=?", (view_key,)
+        ).fetchone()
+        if not row:
             raise ValueError("Unknown view key")
+    if row["status"] == "active":
+        with store() as db:
+            reconcile(
+                db,
+                db.execute(
+                    "SELECT * FROM runs WHERE view_key=?", (view_key,)
+                ).fetchone(),
+            )
+    with store(read=True) as db:
+        run = db.execute("SELECT * FROM runs WHERE view_key=?", (view_key,)).fetchone()
         flow = run["id"]
         result = summary(db, flow)
         result.update(
@@ -659,38 +901,11 @@ def enrich_workers(result):
             )
     except (sqlite3.Error, OSError):
         pass
-    # The private schema can change. A positive identified exit can correct a missed hook.
-    if result["status"] != "active":
-        return
-    try:
-        with metadata("thread_history_1.sqlite") as db:
-            for agent in agents:
-                if agent["status"] not in ("running", "waiting"):
-                    continue
-                r = db.execute(
-                    "SELECT status,started_at,completed_at FROM thread_turns WHERE thread_id=? "
-                    "ORDER BY rollout_ordinal DESC LIMIT 1",
-                    (agent["id"],),
-                ).fetchone()
-                if (
-                    not r
-                    or not r["completed_at"]
-                    or not agent["started_at"]
-                    or r["completed_at"] < int(agent["started_at"])
-                ):
-                    continue
-                status = {
-                    "completed": "stopped",
-                    "failed": "failed",
-                    "interrupted": "interrupted",
-                }.get(r["status"])
-                if status:
-                    agent.update(status=status, ended_at=r["completed_at"])
-    except (sqlite3.Error, OSError):
-        pass
 
 
 def freeze_workers(db, flow, now):
+    run = db.execute("SELECT * FROM runs WHERE id=?", (flow,)).fetchone()
+    reconcile(db, run)
     agents = [dict(a) for a in db.execute("SELECT * FROM agents WHERE flow=?", (flow,))]
     enrich_workers({"agents": agents, "status": "active"})
     for a in agents:
@@ -715,12 +930,12 @@ def turn_info(actor, turn=None):
         with metadata("thread_history_1.sqlite") as db:
             if turn:
                 return db.execute(
-                    "SELECT turn_id,status,started_at,completed_at FROM thread_turns "
+                    "SELECT turn_id,status,started_at,completed_at,rollout_ordinal FROM thread_turns "
                     "WHERE thread_id=? AND turn_id=?",
                     (actor, turn),
                 ).fetchone()
             return db.execute(
-                "SELECT turn_id,status,started_at,completed_at FROM thread_turns "
+                "SELECT turn_id,status,started_at,completed_at,rollout_ordinal FROM thread_turns "
                 "WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1",
                 (actor,),
             ).fetchone()
@@ -778,6 +993,29 @@ def hook(event):
         ).rowcount:
             return {}
         run = current(db, root)
+        native_root = thread_anchor(info["actor"], turn)
+        if run and native_root:
+            anchor_set = {
+                a[0]
+                for a in db.execute(
+                    "SELECT parent_turn FROM run_turns WHERE flow=?", (run["id"],)
+                )
+            }
+            if not anchor_set:
+                anchor = add_anchor(db, run, run["started_at"])
+                anchor_set = {anchor} if anchor else set()
+            if native_root not in anchor_set:
+                if (
+                    run["status"] == "active"
+                    or parent_at(root, time.time()) != native_root
+                ):
+                    return {}
+            if (
+                run["status"] != "active"
+                and native_root in anchor_set
+                and (spawn or kind == "SubagentStart")
+            ):
+                return {}
         if spawn:
             if not run or run["status"] != "active":
                 run = create_run(db, root)
@@ -795,6 +1033,11 @@ def hook(event):
                 }
         elif kind == "Interrupt":
             if run and run["status"] == "active":
+                if native_root and parent_at(root, time.time()) not in (
+                    None,
+                    native_root,
+                ):
+                    return {}
                 now = time.time()
                 freeze_workers(db, run["id"], now)
                 db.execute(
@@ -837,6 +1080,11 @@ def hook(event):
                 }
             if old and old["status"] == "active":
                 actual = turn_info(info["actor"], turn)
+                newer = turn_info(info["actor"]) if actual else None
+                if newer and newer["rollout_ordinal"] > actual["rollout_ordinal"]:
+                    return {}
+                if native_root:
+                    reconcile(db, old)
                 status = {"failed": "failed", "interrupted": "interrupted"}.get(
                     actual["status"] if actual else None, "stopped"
                 )

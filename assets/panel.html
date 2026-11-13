@@ -263,7 +263,7 @@ function makeRow(entry,open) {
   if (a) sum.append(pet);
   sum.append(copy); node.append(sum);
   const dl = el('dl','meta');
-  const fields = [['任务',task?.id],['代理',a?.name || a?.id],['模型',a?.model],['推理强度',a?.effort],['线程累计 token',a?.tokens],
+  const fields = [['任务',task?.id],['代理',a?.name || a?.id || '未关联子代理'],['模型',a?.model],['推理强度',a?.effort],['线程累计 token',a?.tokens],
     ['上下文',a?.context_used == null ? null : a.context_used+(a.context_window == null ? '' : '/'+a.context_window)],['估算费用',a?.cost==null?null:'$'+a.cost]];
   for (const [k,v] of fields) if (v != null && v !== '') dl.append(el('dt','',k),el('dd','',String(v)));
   node.append(dl);

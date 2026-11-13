@@ -14,7 +14,7 @@ import state
 
 HERE = Path(__file__).resolve().parent
 ASAR = Path('/Applications/ChatGPT.app/Contents/Resources/app.asar')
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 MIME = 'text/html;profile=mcp-app'
 TRACK = 'ui://savvy-progress/v2/track.html'
 PANEL = 'ui://savvy-progress/v2/panel.html'
