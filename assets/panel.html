@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex Agent Panel</title>
+<style>
+  :root { color-scheme:light dark; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;
+    --ink:light-dark(#1b2028,#eff1f6); --muted:light-dark(#57616f,#acb6c6); --rule:light-dark(#dce0e6,#3a424f);
+    --wash:light-dark(#f0f2f5,#282e38); --bg:light-dark(#fff,#1a1e25); --accent:light-dark(#087f78,#4ecdc0);
+    --warn:light-dark(#a86a08,#f0ba60); --ok:light-dark(#28814b,#77cd94); --error:light-dark(#ac403d,#f19893); }
+  :root[data-theme="dark"] { color-scheme:dark } :root[data-theme="light"] { color-scheme:light }
+  * { box-sizing:border-box } body { margin:0; color:var(--ink); background:transparent; }
+  [hidden] { display:none!important } button,input { color:inherit; font:inherit; }
+  button { cursor:pointer } button:focus-visible,input:focus-visible,summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+  main { background:var(--bg); } h1,h2,p { margin:0 } h1 { font-size:17px; font-weight:650; overflow-wrap:anywhere }
+  .lead { padding:12px 14px 14px; } .lead p { color:var(--muted); margin:3px 0 9px; }
+  .bar { height:6px; background:var(--rule); border-radius:6px; overflow:hidden; }
+  .bar i { display:block; background:var(--accent); height:100%; }
+  #summary { padding:9px 12px 10px; background:var(--bg); border:1px solid var(--rule); border-radius:10px; }
+  .counts { display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 10px; margin-bottom:7px; }
+  .counts strong { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .counts button { margin-left:auto; color:var(--ink); font-weight:600; }
+  .toggle { background:transparent; border:none; padding:2px 0; }
+  .hint,.message { color:var(--muted); font-size:12px; padding:7px 12px; overflow-wrap:anywhere; }
+  .hint button { color:var(--accent); font-weight:600; }
+  .message:empty { display:none }
+  h2 { background:var(--wash); padding:5px 14px; font-size:12px; font-weight:650; color:var(--muted); }
+  .count { margin-left:6px; font-weight:500; }
+  .agent { border-bottom:1px solid var(--rule); }
+  .agent:last-child { border-bottom:0; }
+  .agent summary { list-style:none; cursor:pointer; display:grid; grid-template-columns:48px minmax(0,1fr);
+    align-items:center; gap:10px; padding:10px 14px; }
+  .agent summary::-webkit-details-marker { display:none }
+  .agent summary:hover { background:var(--wash) }
+  .name { display:flex; align-items:baseline; gap:8px; }
+  .name strong { overflow-wrap:anywhere; flex:1; font-size:14px; }
+  .time { font-variant-numeric:tabular-nums; font-size:12px; color:var(--muted); white-space:nowrap; }
+  .status,.steps { color:var(--muted); font-size:12px; margin-top:3px; overflow-wrap:anywhere; }
+  .status::before { content:''; display:inline-block; width:7px; height:7px; border-radius:100%; background:var(--muted); margin-right:6px; vertical-align:1px; }
+  [data-state="running"] .status::before { background:var(--accent); }
+  [data-state="review"] .status::before,[data-state="waiting"] .status::before { background:var(--warn); }
+  [data-state="accepted"] .status::before { content:'✓'; width:auto; height:auto; border-radius:0; background:none; color:var(--ok); font-weight:bold; }
+  [data-state="failed"] .status::before,[data-state="interrupted"] .status::before { background:var(--error); }
+  .stepbar { margin-top:5px; max-width:190px; height:4px; }
+  .meta { margin:0 14px 10px 72px; color:var(--muted); font-size:12px; display:grid; grid-template-columns:max-content minmax(0,1fr); gap:3px 9px; }
+  .meta dt,.meta dd { margin:0; overflow-wrap:anywhere; }
+  .pet { width:48px; height:52px; background-image:url('__SAVVY_SPRITE__'); background-size:800% 1100%; image-rendering:pixelated; background-repeat:no-repeat; }
+  .agent.planned summary { grid-template-columns:minmax(0,1fr); }
+  .agent.planned .meta { margin-left:14px; }
+  .pet.missing { background-image:none; height:20px; width:20px; border:2px solid var(--rule); border-radius:5px; justify-self:center; }
+  .empty { color:var(--muted); padding:12px 14px; }
+  form { padding:12px; max-width:520px; } label { display:block; font-weight:600; }
+  .pair-controls { display:flex; gap:8px; margin-top:7px; }
+  .pair-controls input { min-width:0; width:100%; background:var(--bg); padding:6px; border:1px solid var(--rule); border-radius:6px; }
+  .pair-controls button { white-space:nowrap; border:1px solid var(--rule); border-radius:6px; background:var(--wash); padding:4px 10px; }
+  .pair-explain { color:var(--muted); margin-top:6px; font-size:12px; }
+  @media(max-width:290px){ .lead,.agent summary,h2{padding-left:8px;padding-right:8px} .agent summary{gap:6px} .name{flex-wrap:wrap;gap:2px 6px} .meta{margin-left:9px;} .counts{gap:3px 6px;} }
+</style>
+</head>
+<body>
+<main>
+  <form id="pair" hidden>
+    <label for="key">连接当前聊天的进度</label>
+    <div class="pair-controls"><input id="key" type="password" placeholder="只读配对码" required autocomplete="off" spellcheck="false"><button>连接</button></div>
+    <p class="pair-explain">输入本聊天进度卡中的配对码。</p>
+  </form>
+  <section id="summary" hidden aria-label="子代理总进度">
+    <div class="counts"><strong id="trackTitle"></strong><span id="trackPhase"></span><span id="count"></span><span id="busy"></span><button class="toggle" id="detailsButton" title="在聊天右侧打开子代理面板">在右侧打开 ›</button></div>
+    <div class="bar" aria-hidden="true"><i></i></div>
+  </section>
+  <div id="panelHint" class="hint" hidden>请在聊天右侧的标签菜单中打开「子代理」。<button class="toggle" id="pairCodeButton">显示配对码</button> <code id="pairCode" hidden></code></div>
+  <article id="details" hidden aria-label="子代理">
+    <header class="lead"><h1></h1><p><span id="detailCount"></span> · <span id="elapsed"></span></p><div class="bar" aria-hidden="true"><i></i></div></header>
+    <div id="groups"></div>
+  </article>
+  <p id="message" class="message" role="status">正在连接进度面板…</p>
+</main>
+<script>
+'use strict';
+const $ = selector => document.querySelector(selector);
+const view = '__SAVVY_VIEW__';
+const isTrack = view === 'track';
+const embedded = window.parent !== window;
+let data, viewKey = '', requestId = 0, ready, refreshTimer, inFlight = false, lastSignature, visibleSince = performance.now();
+const pending = new Map(), rows = new Map(), transitions = new Map();
+let states = new Map();
+const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+let onScreen = true, explicitKey = '', displayMode = 'inline', supportedModes, opening = false, showHint = false;
+const visible = () => onScreen && !document.hidden;
+const groupTitles = ['进行中', '待复核', '已结束', '未开始'];
+const stateText = {running:'运行中', waiting:'等待中', planned:'计划中', review:'待主代理验收', accepted:'已验收', interrupted:'已中断', failed:'失败', cancelled:'已取消', stopped:'已停止 · 结果未报告', ended:'已返回 · 未验收'};
+const phaseText = {plan:'规划', design:'设计', delegate:'执行', review:'复核', close:'收尾'};
+const animations = {idle:[0,1,1,1], working:[7,6,120,220], review:[8,6,150,280], wait:[6,6,150,260], failed:[5,8,140,240], wave:[3,4,140,280]};
+const oneShot = {review:'review',waiting:'wait',accepted:'wave',failed:'failed'};
+const headerBar = $('#summary .bar i'), detailBar = $('#details .bar i');
+let pulseTimer;
+function msg(text) { $('#message').textContent = text; }
+function el(tag, cls, value) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (value !== undefined) n.textContent = value;
+  return n;
+}
+function post(obj) { if (embedded) parent.postMessage({jsonrpc:'2.0', ...obj}, '*'); }
+function rpc(method, params) {
+  return new Promise((resolve, reject) => {
+    const id = ++requestId;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error('宿主未响应')); }, 12000);
+    pending.set(id, {resolve,reject,timer}); post({id,method,params});
+  });
+}
+function context(c) {
+  if (c?.theme === 'light' || c?.theme === 'dark') document.documentElement.dataset.theme = c.theme;
+  if (Array.isArray(c?.availableDisplayModes)) supportedModes=c.availableDisplayModes;
+  if (typeof c?.displayMode === 'string' && displayMode !== c.displayMode) {
+    displayMode=c.displayMode;
+    transitions.clear(); showHint=false; $('#pairCode').hidden=true; $('#pairCode').textContent='';
+    $('#pairCodeButton').textContent='显示配对码';
+    render();
+  }
+}
+window.addEventListener('message', e => {
+  if (!embedded || e.source !== parent || e.data?.jsonrpc !== '2.0') return;
+  const m = e.data;
+  if (m.id != null && !m.method) {
+    const req = pending.get(m.id);
+    if (!req) return;
+    pending.delete(m.id); clearTimeout(req.timer);
+    if (m.error) req.reject(new Error('宿主调用失败')); else req.resolve(m.result);
+  } else if (m.method === 'ui/notifications/tool-result') {
+    const result = m.params?.structuredContent;
+    if (result?.view_key) explicitKey=result.view_key;
+    receiveInitial(result);
+  } else if (m.method === 'ui/notifications/tool-input' && !viewKey && m.params?.arguments?.view_key) {
+    const key = m.params.arguments.view_key; explicitKey=key;
+    call('snapshot',key).then(d=>receiveInitial({...d,view_key:key})).catch(()=>{});
+  } else if (m.method === 'ui/notifications/host-context-changed') {
+    context(m.params);
+  } else if (m.id != null && m.method === 'ui/resource-teardown') {
+    clearInterval(refreshTimer); clearTimeout(pulseTimer); post({id:m.id,result:{}});
+  }
+});
+async function call(name, key) {
+  await ready;
+  const result = await rpc('tools/call',{name,arguments:key ? {view_key:key} : {}});
+  if (!key && result?.structuredContent?.paired === false) return result.structuredContent;
+  if (result?.isError || !result?.structuredContent?.flow_id) throw new Error('无法读取进度');
+  return result.structuredContent;
+}
+function receiveInitial(d) {
+  if (!d) return;
+  if (d.flow_id && d.view_key) {
+    if (explicitKey && explicitKey !== d.view_key) return;
+    if (viewKey && viewKey !== d.view_key) {
+      if (explicitKey !== d.view_key) return;
+      data=null; lastSignature=null; transitions.clear(); rows.clear(); states.clear(); $('#groups').replaceChildren();
+    }
+    if (data?.updated_at > d.updated_at) return;
+    viewKey = d.view_key; apply(d); scheduleRefresh();
+  } else if (!viewKey && d.paired === false) {
+    $('#pair').hidden = false; msg('');
+  }
+}
+function apply(d) {
+  if (data && data.flow_id !== d.flow_id) return;
+  $('#pair').hidden = true; msg('');
+  const first = !data, priorStatus=data?.status;
+  data = d;
+  const signature = JSON.stringify([d.title,d.phase,d.status,d.total_known,d.total,d.accepted,d.agents,d.tasks]);
+  if (priorStatus!==d.status) scheduleRefresh();
+  if (signature !== lastSignature) { lastSignature = signature; render(!first); }
+  pulse();
+}
+function displayTime(start,end,running) {
+  if (!Number.isFinite(start)) return '';
+  const limit = Number.isFinite(end) ? end : running ? Date.now()/1000 : null;
+  if (limit === null) return '';
+  const sec = Math.max(0,Math.floor(limit-start)), min = Math.floor(sec/60);
+  return (min>=60 ? Math.floor(min/60)+':'+String(min%60).padStart(2,'0') : String(min).padStart(2,'0')) + ':' + String(sec%60).padStart(2,'0');
+}
+function setBar(node,n,total) { node.style.width = (total > 0 ? Math.max(0,Math.min(100,n*100/total)) : 0)+'%'; }
+function render(live = false) {
+  if (!data) return;
+  const d = data;
+  const running = d.status === 'interrupted' ? 0 : d.agents.filter(a => a.status === 'running').length;
+  const count = d.total_known !== false && (d.total > 0 || d.total_known === true) ? '已验收 '+d.accepted+'/'+d.total : '尚未声明任务';
+  $('#count').textContent = count; $('#busy').textContent = '运行中 '+running;
+  const panel = displayMode === 'fullscreen';
+  $('#summary').hidden = panel;
+  $('#details').hidden = !panel;
+  $('#panelHint').hidden = panel || !showHint;
+  $('#detailsButton').disabled=opening;
+  $('#details h1').textContent = d.title || '子代理';
+  const phase = phaseText[d.phase] || d.phase;
+  const flowState = d.status === 'interrupted' ? '已中断' : d.status === 'completed' ? '已结束' : phase;
+  $('#trackTitle').textContent = d.title || '子代理';
+  $('#trackPhase').textContent = phase || '阶段未报告';
+  $('#detailCount').textContent = [count,flowState].filter(Boolean).join(' · ');
+  setBar(headerBar,d.accepted,d.total); setBar(detailBar,d.accepted,d.total);
+  if ($('#details').hidden) return;
+  const tasks = new Map(d.tasks.map(t => [t.id,t])), attached = new Set(), lastByTask = new Map();
+  for (const a of d.agents) if (a.task_id && ['running','waiting','ended'].includes(a.status)) lastByTask.set(a.task_id,a.id);
+  const groups = [[],[],[],[]];
+  for (const a of d.agents) {
+    const task = tasks.get(a.task_id);
+    if (task) attached.add(task.id);
+    let state = a.status in stateText ? a.status : 'stopped';
+    if (a.status === 'ended' && (!task || lastByTask.get(task.id) === a.id)) state = task?.accepted ? 'accepted' : 'review';
+    if (d.status === 'interrupted' && state === 'running') state = 'interrupted';
+    groups[state === 'running' || state === 'waiting' ? 0 : state === 'review' ? 1 : 2].push({id:'a:'+a.id, title:task?.title || a.name || '子代理', state, a,task});
+  }
+  for (const t of d.tasks) if (!attached.has(t.id)) {
+    const state = t.accepted ? 'accepted' : d.status === 'interrupted' ? 'interrupted' : 'planned';
+    groups[state === 'planned' ? 3 : 2].push({id:'t:'+t.id,title:t.title,state,task:t});
+  }
+  const planOrder = new Map(d.tasks.map((task,index)=>[task.id,index]));
+  const rank = entry => planOrder.get(entry.task?.id) ?? Infinity;
+  const previousOpen = new Set([...rows].filter(([,v])=>v.node.open).map(([id])=>id));
+  const focusId = [...rows].find(([,r])=>r.node.contains(document.activeElement))?.[0];
+  const nextStates = new Map();
+  rowObserver.disconnect();
+  rows.clear();
+  const fragment = document.createDocumentFragment();
+  groups.forEach((entries,i) => {
+    if (!entries.length) return;
+    const h = el('h2','',groupTitles[i]); h.append(el('span','count',String(entries.length))); fragment.append(h);
+    for (const entry of entries.sort((left,right)=>rank(left)-rank(right))) {
+      nextStates.set(entry.id,entry.state);
+      if (states.get(entry.id) !== entry.state) {
+        transitions.delete(entry.id);
+        if (live && visible() && !reduced.matches && oneShot[entry.state])
+          transitions.set(entry.id,performance.now());
+      }
+      const row = makeRow(entry, previousOpen.has(entry.id));
+      fragment.append(row.node); rows.set(entry.id,row); rowObserver.observe(row.node);
+    }
+  });
+  if (rows.size === 0) fragment.append(el('p','empty','还没有子代理活动'));
+  states = nextStates;
+  $('#groups').replaceChildren(fragment);
+  if (focusId) rows.get(focusId)?.node.querySelector('summary').focus({preventScroll:true});
+  pulse();
+}
+function makeRow(entry,open) {
+  const {id,title,state,task,a} = entry;
+  const node = el('details',a ? 'agent' : 'agent planned'); node.dataset.state = state; node.dataset.entryId=id; node.open = open;
+  const sum = el('summary'), pet = el('span','pet'), copy = el('div'), name = el('div','name');
+  pet.setAttribute('aria-hidden','true');
+  if (!hasSprite) pet.classList.add('missing');
+  const time = el('span','time');
+  name.append(el('strong','',title),time);
+  copy.append(name,el('div','status',stateText[state]));
+  if (a && (a.note || Number.isFinite(a.done) && Number.isFinite(a.total))) {
+    const progress = Number.isFinite(a.done) && a.total > 0;
+    copy.append(el('p','steps',[progress ? a.done+'/'+a.total : '',a.note].filter(Boolean).join(' · ')));
+    if (progress) {
+      const b = el('div','bar stepbar'), fill = el('i'); setBar(fill,a.done,a.total);
+      b.setAttribute('aria-hidden','true'); b.append(fill); copy.append(b);
+    }
+  }
+  if (a && !(Number.isFinite(a.done) && a.total > 0)) copy.append(el('p','steps','步骤未报告'));
+  if (a) sum.append(pet);
+  sum.append(copy); node.append(sum);
+  const dl = el('dl','meta');
+  const fields = [['任务',task?.id],['代理',a?.name || a?.id],['模型',a?.model],['推理强度',a?.effort],['线程累计 token',a?.tokens],
+    ['上下文',a?.context_used == null ? null : a.context_used+(a.context_window == null ? '' : '/'+a.context_window)],['估算费用',a?.cost==null?null:'$'+a.cost]];
+  for (const [k,v] of fields) if (v != null && v !== '') dl.append(el('dt','',k),el('dd','',String(v)));
+  node.append(dl);
+  // Mix the worker ID into the initial frame; separate running workers keep their own cadence.
+  let offset = 0;
+  for (const c of id) offset = (Math.imul(offset,31) + c.codePointAt(0)) >>> 0;
+  return {node,pet,time,entry,offset,inView:false};
+}
+function pulse() {
+  clearTimeout(pulseTimer);
+  if (!visible() || $('#details').hidden || !data) return;
+  const now = performance.now();
+  const active=data.status==='active';
+  const flowTime=displayTime(data.started_at,data.ended_at,active);
+  const elapsed=flowTime ? '总耗时 '+flowTime : '总耗时未知';
+  if ($('#elapsed').textContent!==elapsed) $('#elapsed').textContent=elapsed;
+  let next=active ? 1000 : Infinity;
+  for (const {pet,time,entry,offset,inView} of rows.values()) {
+    const {state,a} = entry;
+    if (!a || !inView) continue;
+    const text = a ? displayTime(a.started_at,a.ended_at,state==='running'||state==='waiting') : '';
+    if (time.textContent !== text) time.textContent = text;
+    const start = transitions.get(entry.id);
+    const anim = state === 'running' ? 'working' : oneShot[state] || 'idle';
+    const [row,frames,dt,last] = animations[anim];
+    const period=(frames-1)*dt+last;
+    let frame=0, phase;
+    if (frames > 1 && !reduced.matches && hasSprite) {
+      if (state === 'running') phase=(now-visibleSince + (offset%frames)*dt)%period;
+      else if (start !== undefined && now-start < period) phase=now-start;
+      else { transitions.delete(entry.id); frame=frames-1; }
+      if (phase !== undefined) {
+        frame=Math.min(frames-1,Math.floor(phase/dt));
+        next=Math.min(next,(frame===frames-1 ? period : (frame+1)*dt)-phase);
+      }
+    }
+    pet.style.backgroundPosition=(frame*100/7)+'% '+(row*10)+'%';
+    if (state === 'running' || state === 'waiting') next=Math.min(next,1000);
+  }
+  if (Number.isFinite(next)) pulseTimer=setTimeout(pulse,Math.max(18,Math.ceil(next)));
+}
+function scheduleRefresh() {
+  clearInterval(refreshTimer);
+  if (visible() && viewKey && data?.status==='active') refreshTimer=setInterval(refresh,2000);
+}
+async function refresh() {
+  if (!viewKey || inFlight || !visible()) return;
+  inFlight=true;
+  try { const fresh=await call('snapshot',viewKey); if (fresh.flow_id===data?.flow_id && !(fresh.updated_at<data.updated_at)) apply(fresh); } catch { msg('更新暂时中断，保留上次状态。'); }
+  finally { inFlight=false; }
+}
+$('#detailsButton').onclick=async()=>{
+  if (opening || displayMode==='fullscreen') return;
+  opening=true; $('#detailsButton').disabled=true;
+  try {
+    if (supportedModes && !supportedModes.includes('fullscreen')) { showHint=true; return; }
+    await ready;
+    const reply=await rpc('ui/request-display-mode',{mode:'fullscreen'});
+    // Only the host's context can reveal the panel. The inline iframe may survive a successful open.
+    showHint=displayMode!=='fullscreen' && reply?.mode!=='fullscreen';
+  } catch { showHint=displayMode!=='fullscreen'; }
+  finally { opening=false; render(); }
+};
+$('#pairCodeButton').onclick=()=>{
+  const box=$('#pairCode'); box.hidden=!box.hidden; box.textContent=box.hidden ? '' : viewKey;
+  $('#pairCodeButton').textContent=box.hidden ? '显示配对码' : '隐藏配对码';
+};
+$('#pair').onsubmit=async e=>{
+  e.preventDefault();
+  const value=$('#key').value.trim(); if(!value) return;
+  const button=$('#pair button'); button.disabled=true;
+  try {
+    const d=await call('pair',value); viewKey=value; $('#key').value=''; apply(d); scheduleRefresh();
+  } catch { msg('无法连接。请核对当前聊天的只读配对码。'); }
+  finally { button.disabled=false; }
+};
+function visibilityChanged() {
+  transitions.clear();
+  if (visible()) visibleSince=performance.now();
+  scheduleRefresh(); pulse();
+  if (visible()) refresh();
+}
+document.addEventListener('visibilitychange',visibilityChanged);
+new IntersectionObserver(([entry])=>{
+  if (onScreen !== entry.isIntersecting) { onScreen=entry.isIntersecting; visibilityChanged(); }
+}).observe(document.querySelector('main'));
+reduced.addEventListener('change',()=>{transitions.clear(); pulse();});
+const rowObserver = new IntersectionObserver(entries=>{
+  for(const item of entries) {
+    const key=item.target.dataset.entryId, row=rows.get(key);
+    if (row?.node!==item.target) continue;
+    row.inView=item.isIntersecting;
+    if (!item.isIntersecting) transitions.delete(key);
+  }
+  pulse();
+});
+const probe=el('span','pet');
+document.body.append(probe);
+const hasSprite=getComputedStyle(probe).backgroundImage.startsWith('url("data:image/');
+probe.remove();
+if (embedded) {
+  ready=rpc('ui/initialize',{protocolVersion:'2026-01-26',appCapabilities:{availableDisplayModes:isTrack ? ['inline','fullscreen'] : ['fullscreen']},appInfo:{name:'savvy-progress',version:'__SAVVY_VERSION__'}})
+    .then(r=>{ context(r?.hostContext); post({method:'ui/notifications/initialized',params:{}}); })
+    .catch(()=>{msg('宿主未连接。请从当前聊天重新打开子代理面板。');});
+  ready.then(async()=>{
+    if (viewKey || explicitKey) return;
+    if (isTrack) { $('#pair').hidden=false; msg(''); return; }
+    try { receiveInitial(await call('snapshot')); }
+    catch { if(!viewKey){$('#pair').hidden=false;msg('');} }
+  });
+  let height=-1;
+  new ResizeObserver(()=>{const h=Math.ceil(document.querySelector('main').getBoundingClientRect().height);
+    if(h!==height && h>0){height=h;post({method:'ui/notifications/size-changed',params:{height:h}});}
+  }).observe(document.querySelector('main'));
+} else msg('请在 Codex 当前聊天中打开子代理面板。');
+</script>
+</body>
+</html>

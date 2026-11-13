@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "savvy-progress-codex": {
+      "command": "python3",
+      "args": ["-B", "./server.py"],
+      "cwd": ".",
+      "env_vars": ["HOME", "CODEX_HOME", "PATH", "SAVVY_PROGRESS_HOME"],
+      "tool_timeout_sec": 20
+    }
+  }
+}

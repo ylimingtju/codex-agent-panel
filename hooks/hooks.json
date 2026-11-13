@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "PostToolUse": [{"matcher":"^Agent$|(^|[.])spawn_agent$","hooks":[{"type":"command","command":"python3 -B \"${PLUGIN_ROOT}/state.py\" hook","timeout":5}]}],
+    "SubagentStart": [{"hooks":[{"type":"command","command":"python3 -B \"${PLUGIN_ROOT}/state.py\" hook","timeout":5}]}],
+    "SubagentStop": [{"hooks":[{"type":"command","command":"python3 -B \"${PLUGIN_ROOT}/state.py\" hook","timeout":5}]}],
+    "Interrupt": [{"hooks":[{"type":"command","command":"python3 -B \"${PLUGIN_ROOT}/state.py\" hook","timeout":3}]}]
+  }
+}
