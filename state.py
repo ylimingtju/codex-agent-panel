@@ -444,6 +444,14 @@ def view_for_thread(thread_id, view_key=None):
         return dict(row) if row else None
 
 
+def widget_session_id(view_key):
+    with store(read=True) as db:
+        run = db.execute("SELECT root FROM runs WHERE view_key=?", (view_key,)).fetchone()
+        if not run:
+            raise ValueError("Unknown view key")
+        return "codex-agent-panel-" + digest("widget:" + run["root"])
+
+
 def mark_shown(view_key):
     with store() as db:
         db.execute("UPDATE runs SET shown=1 WHERE view_key=?", (view_key,))

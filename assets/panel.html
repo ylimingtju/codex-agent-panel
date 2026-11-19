@@ -69,7 +69,7 @@
     <div class="counts"><strong id="trackTitle"></strong><span id="trackPhase"></span><span id="count"></span><span id="busy"></span><button class="toggle" id="detailsButton" title="在聊天右侧打开子代理面板">在右侧打开 ›</button></div>
     <div class="bar" aria-hidden="true"><i></i></div>
   </section>
-  <div id="panelHint" class="hint" hidden>请在聊天右侧的标签菜单中打开「子代理」。<button class="toggle" id="pairCodeButton">显示配对码</button> <code id="pairCode" hidden></code></div>
+  <div id="panelHint" class="hint" hidden>当前窗口未能打开侧栏。请在 Codex 桌面端的这段聊天里输入「查看子代理详情」。<button class="toggle" id="pairCodeButton">显示配对码</button> <code id="pairCode" hidden></code></div>
   <article id="details" hidden aria-label="子代理">
     <header class="lead"><h1></h1><p><span id="detailCount"></span> · <span id="elapsed"></span></p><div class="bar" aria-hidden="true"><i></i></div></header>
     <div id="groups"></div>
@@ -86,7 +86,8 @@ let data, viewKey = '', requestId = 0, ready, refreshTimer, inFlight = false, la
 const pending = new Map(), rows = new Map(), transitions = new Map();
 let states = new Map();
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
-let onScreen = true, explicitKey = '', displayMode = 'inline', supportedModes, opening = false, showHint = false;
+let onScreen = true, displayMode = 'inline', supportedModes, opening = false, showHint = false;
+let lastOpenRequest;
 const visible = () => onScreen && !document.hidden;
 const groupTitles = ['进行中', '待复核', '已结束', '未开始'];
 const stateText = {running:'运行中', waiting:'等待中', planned:'计划中', review:'待主代理验收', accepted:'已验收', interrupted:'已中断', failed:'失败', cancelled:'已取消', stopped:'已停止 · 结果未报告', ended:'已返回 · 未验收'};
@@ -117,7 +118,8 @@ function context(c) {
     displayMode=c.displayMode;
     transitions.clear(); showHint=false; $('#pairCode').hidden=true; $('#pairCode').textContent='';
     $('#pairCodeButton').textContent='显示配对码';
-    render();
+    render(); scheduleRefresh();
+    if (viewKey && displayMode === 'fullscreen') refresh();
   }
 }
 window.addEventListener('message', e => {
@@ -129,12 +131,21 @@ window.addEventListener('message', e => {
     pending.delete(m.id); clearTimeout(req.timer);
     if (m.error) req.reject(new Error('宿主调用失败')); else req.resolve(m.result);
   } else if (m.method === 'ui/notifications/tool-result') {
-    const result = m.params?.structuredContent;
-    if (result?.view_key) explicitKey=result.view_key;
-    receiveInitial(result);
-  } else if (m.method === 'ui/notifications/tool-input' && !viewKey && m.params?.arguments?.view_key) {
-    const key = m.params.arguments.view_key; explicitKey=key;
-    call('snapshot',key).then(d=>receiveInitial({...d,view_key:key})).catch(()=>{});
+    const result=m.params?.structuredContent, meta=m.params?._meta;
+    receive(result);
+    const request=meta?.['codex-agent-panel/openRequest'];
+    if (request && request!==lastOpenRequest && result?.view_key===viewKey) {
+      lastOpenRequest=request;
+      // A restored tool result should not reopen a panel the user closed.
+      const storageKey='open:'+meta['openai/widgetSessionId'];
+      try {
+        if (sessionStorage.getItem(storageKey)===request) return;
+        sessionStorage.setItem(storageKey,request);
+      } catch { /* Some hosts only provide storage for the lifetime of this frame. */ }
+      openPanel();
+    }
+  } else if (m.method === 'ui/notifications/tool-input' && !data && m.params?.arguments?.view_key) {
+    call('snapshot',m.params.arguments.view_key).then(receive).catch(()=>{});
   } else if (m.method === 'ui/notifications/host-context-changed') {
     context(m.params);
   } else if (m.id != null && m.method === 'ui/resource-teardown') {
@@ -148,29 +159,25 @@ async function call(name, key) {
   if (result?.isError || !result?.structuredContent?.flow_id) throw new Error('无法读取进度');
   return result.structuredContent;
 }
-function receiveInitial(d) {
-  if (!d) return;
-  if (d.flow_id && d.view_key) {
-    if (explicitKey && explicitKey !== d.view_key) return;
-    if (viewKey && viewKey !== d.view_key) {
-      if (explicitKey !== d.view_key) return;
-      data=null; lastSignature=null; transitions.clear(); rows.clear(); states.clear(); $('#groups').replaceChildren();
-    }
-    if (data?.updated_at > d.updated_at) return;
-    viewKey = d.view_key; apply(d); scheduleRefresh();
-  } else if (!viewKey && d.paired === false) {
-    $('#pair').hidden = false; msg('');
+function receive(d) {
+  if (!d?.flow_id || !d.view_key) {
+    if (!data && d?.paired === false) { $('#pair').hidden=false; msg(''); }
+    return;
   }
-}
-function apply(d) {
-  if (data && data.flow_id !== d.flow_id) return;
+  const newRun = data && d.flow_id !== data.flow_id;
+  // An old tool notification or an outstanding refresh can arrive after the new run.
+  if (data && (newRun ? d.started_at < data.started_at : d.updated_at < data.updated_at)) return;
+  if (newRun) {
+    lastSignature=null; transitions.clear(); rows.clear(); states.clear();
+    $('#groups').replaceChildren(); $('#pairCode').hidden=true; $('#pairCode').textContent='';
+    $('#pairCodeButton').textContent='显示配对码';
+  }
   $('#pair').hidden = true; msg('');
-  const first = !data, priorStatus=data?.status;
-  data = d;
+  const animate = Boolean(data && !newRun);
+  data=d; viewKey=d.view_key;
   const signature = JSON.stringify([d.title,d.phase,d.status,d.total_known,d.total,d.accepted,d.agents,d.tasks]);
-  if (priorStatus!==d.status) scheduleRefresh();
-  if (signature !== lastSignature) { lastSignature = signature; render(!first); }
-  pulse();
+  if (signature !== lastSignature) { lastSignature = signature; render(animate); }
+  scheduleRefresh(); pulse();
 }
 function displayTime(start,end,running) {
   if (!Number.isFinite(start)) return '';
@@ -307,26 +314,37 @@ function pulse() {
 }
 function scheduleRefresh() {
   clearInterval(refreshTimer);
-  if (visible() && viewKey && data?.status==='active') refreshTimer=setInterval(refresh,2000);
+  if (!visible() || !data) return;
+  if (data.status==='active') refreshTimer=setInterval(refresh,2000);
+  else if (displayMode==='fullscreen' && data.can_follow_latest) refreshTimer=setInterval(refresh,8000);
 }
 async function refresh() {
   if (!viewKey || inFlight || !visible()) return;
   inFlight=true;
-  try { const fresh=await call('snapshot',viewKey); if (fresh.flow_id===data?.flow_id && !(fresh.updated_at<data.updated_at)) apply(fresh); } catch { msg('更新暂时中断，保留上次状态。'); }
+  const key=viewKey;
+  try {
+    if (displayMode==='fullscreen' && data.can_follow_latest) {
+      const latest=await call('snapshot');
+      if (latest.flow_id) { receive(latest); return; }
+    }
+    receive(await call('snapshot',key));
+  } catch { if (key===viewKey) msg('更新暂时中断，保留上次状态。'); }
   finally { inFlight=false; }
 }
-$('#detailsButton').onclick=async()=>{
+async function openPanel() {
   if (opening || displayMode==='fullscreen') return;
   opening=true; $('#detailsButton').disabled=true;
   try {
     if (supportedModes && !supportedModes.includes('fullscreen')) { showHint=true; return; }
     await ready;
+    if (displayMode==='fullscreen') return;
     const reply=await rpc('ui/request-display-mode',{mode:'fullscreen'});
     // Only the host's context can reveal the panel. The inline iframe may survive a successful open.
     showHint=displayMode!=='fullscreen' && reply?.mode!=='fullscreen';
   } catch { showHint=displayMode!=='fullscreen'; }
   finally { opening=false; render(); }
-};
+}
+$('#detailsButton').onclick=openPanel;
 $('#pairCodeButton').onclick=()=>{
   const box=$('#pairCode'); box.hidden=!box.hidden; box.textContent=box.hidden ? '' : viewKey;
   $('#pairCodeButton').textContent=box.hidden ? '显示配对码' : '隐藏配对码';
@@ -336,7 +354,8 @@ $('#pair').onsubmit=async e=>{
   const value=$('#key').value.trim(); if(!value) return;
   const button=$('#pair button'); button.disabled=true;
   try {
-    const d=await call('pair',value); viewKey=value; $('#key').value=''; apply(d); scheduleRefresh();
+    receive(await call('pair',value)); $('#key').value='';
+    if (displayMode==='fullscreen' && data?.can_follow_latest) refresh();
   } catch { msg('无法连接。请核对当前聊天的只读配对码。'); }
   finally { button.disabled=false; }
 };
@@ -369,9 +388,9 @@ if (embedded) {
     .then(r=>{ context(r?.hostContext); post({method:'ui/notifications/initialized',params:{}}); })
     .catch(()=>{msg('宿主未连接。请从当前聊天重新打开子代理面板。');});
   ready.then(async()=>{
-    if (viewKey || explicitKey) return;
-    if (isTrack) { $('#pair').hidden=false; msg(''); return; }
-    try { receiveInitial(await call('snapshot')); }
+    if (viewKey) return;
+    if (isTrack && displayMode!=='fullscreen') { $('#pair').hidden=false; msg(''); return; }
+    try { receive(await call('snapshot')); }
     catch { if(!viewKey){$('#pair').hidden=false;msg('');} }
   });
   let height=-1;

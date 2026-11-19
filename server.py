@@ -14,13 +14,14 @@ import state
 
 HERE = Path(__file__).resolve().parent
 ASAR = Path('/Applications/ChatGPT.app/Contents/Resources/app.asar')
-VERSION = '0.1.3'
+VERSION = '0.1.5'
 MIME = 'text/html;profile=mcp-app'
-TRACK = 'ui://savvy-progress/v2/track.html'
+TRACK = 'ui://savvy-progress/v3/track.html'
 PANEL = 'ui://savvy-progress/v2/panel.html'
 VIEWS = {TRACK: ('track', '任务进度'), PANEL: ('panel', '子代理')}
 # Old tool results may still refer to the previous resource URIs.
-LEGACY_VIEWS = {uri.replace('/v2/', '/'): uri for uri in VIEWS}
+LEGACY_VIEWS = {'ui://savvy-progress/track.html': TRACK, 'ui://savvy-progress/v2/track.html': TRACK,
+                'ui://savvy-progress/panel.html': PANEL}
 PROTOCOLS = ('2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05')
 
 
@@ -47,9 +48,7 @@ def tool(name, title, description, schema, visibility, resource=None):
     if resource:
         ui['resourceUri'] = resource
         meta['openai/outputTemplate'] = resource
-        meta['openai/ui'] = {'preferredModelDisplayMode': 'inline' if resource == TRACK else 'fullscreen'}
-        if resource == PANEL:
-            meta['openai/ui']['entrypoints'] = [{'type': 'thread'}]
+        meta['openai/ui'] = {'preferredModelDisplayMode': 'fullscreen' if name == 'show_panel' else 'inline'}
     return {'name': name, 'title': title, 'description': description, 'inputSchema': schema,
             'annotations': {'readOnlyHint': name not in ('progress', 'step'), 'openWorldHint': False}, '_meta': meta}
 
@@ -60,7 +59,7 @@ TOOLS = {t['name']: t for t in (
     tool('show_track', '任务进度', '在当前聊天显示实时总进度。传入本工作流的只读配对码。',
          object_schema(KEY), ['model', 'app'], TRACK),
     tool('show_panel', '子代理', '打开当前聊天的代理详情。首次打开时可输入此工作流的只读配对码。',
-         object_schema(KEY), ['model', 'app'], PANEL),
+         object_schema(KEY), ['model', 'app'], TRACK),
     tool('pair', '配对当前工作流', '检查用户提供的只读配对码并显示该工作流。',
          object_schema(KEY, ('view_key',)), ['app']),
     tool('snapshot', '读取工作流快照', '使用只读配对码刷新同一工作流。',
@@ -148,13 +147,15 @@ def call(name, args, meta):
         view = state.view_for_thread(thread, key)
         if not view and key:
             raise ValueError('配对码与当前聊天不匹配。')
+        if view and key and name in ('show_track', 'show_panel'):
+            view = state.view_for_thread(thread)
         key = view['view_key'] if view else None
     if not key:
         return {'paired': False}
     data = state.snapshot(key)
     if name == 'show_track':
         state.mark_shown(key)
-    return {**data, 'view_key': key}
+    return {**data, 'view_key': key, 'can_follow_latest': bool(thread)}
 
 
 class RpcError(Exception):
@@ -202,8 +203,12 @@ def handle(method, params):
             raise RpcError(-32002, 'Unknown resource')
         meta = {'ui': {'prefersBorder': False, 'csp': {'connectDomains': [], 'resourceDomains': ['data:']}}}
         if resolved == TRACK:
-            meta['openai/ui'] = {'availableDisplayModes': ['inline', 'fullscreen'], 'preferredDisplayMode': 'inline'}
-            meta.update({'openai/widgetShowCodexWidgetInline': True, 'openai/widgetHeightHint': 100,
+            meta['openai/ui'] = {'availableDisplayModes': ['inline', 'fullscreen']}
+            if uri != TRACK:
+                meta['openai/ui']['preferredDisplayMode'] = 'inline'
+            # Let the reported card height replace the desktop's 200px minimum.
+            meta.update({'openai/widgetShowCodexWidgetInline': True,
+                         'openai/widgetHeightHint': 58, 'openai/widgetMinFrameHeight': 0,
                          'openai/widgetHideAttribution': True})
         else:
             meta['openai/ui'] = {'availableDisplayModes': ['fullscreen'], 'preferredDisplayMode': 'fullscreen'}
@@ -220,7 +225,12 @@ def handle(method, params):
         data = call(name, args, params.get('_meta'))
     except (ValueError, KeyError, PermissionError) as exc:
         return {'isError': True, 'content': [{'type': 'text', 'text': str(exc)}]}
-    return {'structuredContent': data, 'content': [{'type': 'text', 'text': brief(data)}]}
+    result = {'structuredContent': data, 'content': [{'type': 'text', 'text': brief(data)}]}
+    if name in ('show_track', 'show_panel') and data.get('flow_id'):
+        result['_meta'] = {'openai/widgetSessionId': state.widget_session_id(data['view_key'])}
+        if name == 'show_panel':
+            result['_meta']['codex-agent-panel/openRequest'] = state.token()
+    return result
 
 
 def serve():

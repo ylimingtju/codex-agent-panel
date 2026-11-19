@@ -57,7 +57,10 @@ def check(folder):
         proc.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
         descriptors = {t['name']: t for t in ask('tools/list')['result']['tools']}
         assert descriptors.keys() == {'progress', 'step', 'show_track', 'show_panel', 'pair', 'snapshot'}
-        assert descriptors['show_panel']['_meta']['openai/ui']['entrypoints'] == [{'type': 'thread'}]
+        for name, mode in [('show_track', 'inline'), ('show_panel', 'fullscreen')]:
+            meta = descriptors[name]['_meta']
+            assert meta['ui']['resourceUri'] == server.TRACK
+            assert meta['openai/ui'] == {'preferredModelDisplayMode': mode}
         assert all(descriptors[t]['_meta']['ui']['visibility'] == ['model'] for t in ('progress', 'step'))
         assert all(descriptors[t]['_meta']['ui']['visibility'] == ['app'] for t in ('snapshot', 'pair'))
         assert call('show_panel')['result']['structuredContent'] == {'paired': False}
@@ -69,11 +72,8 @@ def check(folder):
         for view in ask('resources/list')['result']['resources']:
             resource = ask('resources/read', {'uri': view['uri']})['result']['contents'][0]
             modes = resource['_meta']['openai/ui']
-            assert modes['preferredDisplayMode'] == ('inline' if view['uri'] == server.TRACK else 'fullscreen')
+            assert modes.get('preferredDisplayMode') == (None if view['uri'] == server.TRACK else 'fullscreen')
             assert 'fullscreen' in modes['availableDisplayModes']
-            legacy = view['uri'].replace('/v2/', '/')
-            old = ask('resources/read', {'uri': legacy})['result']['contents'][0]
-            assert old['uri'] == legacy and old['_meta'] == resource['_meta']
             assert resource['mimeType'] == 'text/html;profile=mcp-app'
             assert '__SAVVY_' not in resource['text'] and 'ui/initialize' in resource['text']
             assert resource['_meta']['ui']['csp']['connectDomains'] == []
@@ -82,6 +82,10 @@ def check(folder):
         if server.ASAR.exists() and server.sprite_uri():
             assert server.codey_bytes(server.ASAR).startswith(b'RIFF')
             assert len(server.sprite_uri()) < 12_000_000
+        for legacy, target in server.LEGACY_VIEWS.items():
+            old = ask('resources/read', {'uri': legacy})['result']['contents'][0]
+            assert old['uri'] == legacy
+            assert old['_meta']['openai/ui']['preferredDisplayMode'] == ('inline' if target == server.TRACK else 'fullscreen')
         key = admin(MANAGER, 'open')['view_key']
         other_key = admin(OTHER, 'open')['view_key']
         assert other_key != key
@@ -96,6 +100,14 @@ def check(folder):
         ticket = admin(WORKER, 'authorize', 'step', json.dumps(args))['binding']
         assert not call('step', {**args, 'binding': ticket})['result'].get('isError')
         result = call('show_track', {'view_key': key})['result']
+        widget_id = result['_meta']['openai/widgetSessionId']
+        panel = call('show_panel', {'view_key': key})['result']
+        assert panel['_meta']['openai/widgetSessionId'] == widget_id
+        assert panel['_meta']['codex-agent-panel/openRequest'] and 'codex-agent-panel/openRequest' not in result['_meta']
+        assert panel['structuredContent']['can_follow_latest'] is False
+        assert key not in widget_id and MANAGER not in widget_id
+        assert call('snapshot', {'view_key': widget_id})['result']['isError']
+        assert call('show_panel', {'view_key': other_key})['result']['_meta']['openai/widgetSessionId'] != widget_id
         snapshot = result['structuredContent']
         assert snapshot['total'] == 1 and snapshot['accepted'] == 0 and snapshot['title'] == '验收演示'
         assert any(a['done'] == 1 and a['total'] == 2 for a in snapshot['agents'])
@@ -117,6 +129,20 @@ def check(folder):
         assert next_key != key
         assert call('snapshot', {'view_key': key}, {'threadId': MANAGER})['result']['structuredContent']['status'] == 'completed'
         assert call('snapshot', {}, {'threadId': MANAGER})['result']['structuredContent']['view_key'] == next_key
+        for name in ('show_track', 'show_panel'):
+            latest = call(name, {'view_key': key}, {'threadId': MANAGER})['result']
+            assert latest['structuredContent']['view_key'] == next_key
+            assert latest['structuredContent']['can_follow_latest'] is True
+            assert latest['_meta']['openai/widgetSessionId'] == widget_id
+            explicit = call(name, {'view_key': key})['result']
+            assert explicit['structuredContent']['view_key'] == key
+            assert explicit['structuredContent']['can_follow_latest'] is False
+            assert call(name, {'view_key': other_key}, {'threadId': MANAGER})['result']['isError']
+            assert call(name, {'view_key': key}, {'threadId': 'unknown'})['result']['isError']
+            assert call(name)['result']['structuredContent'] == {'paired': False}
+        for name in ('snapshot', 'pair'):
+            assert call(name, {'view_key': key}, {'threadId': MANAGER})['result']['structuredContent']['view_key'] == key
+        assert call('snapshot', {}, {'threadId': MANAGER})['result']['structuredContent']['can_follow_latest'] is True
     finally:
         proc.stdin.close()
         proc.wait(timeout=8)
